@@ -1,16 +1,31 @@
 # RunPod Serverless worker — SDXL base + SMB-Birthday-v2 LoRA.
 # Pin versions deliberately; do not loosen without re-testing generation output.
+#
+# IMPORTANT: torch / torchvision / torchaudio are intentionally NOT listed
+# here. The runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+# base image already ships a CUDA 12.8-enabled PyTorch 2.8 build with
+# Blackwell (sm_120, e.g. RTX PRO 6000 Blackwell) support built in. Pinning
+# an older torch/torchvision here would make `pip install -r requirements.txt`
+# downgrade or replace that build — reintroducing the Blackwell
+# incompatibility, or worse, installing a CPU-only wheel. `pip install`
+# without `-U`/`--upgrade` (see Dockerfile) leaves an already-satisfied,
+# already-installed torch alone, so omitting these lines is what keeps the
+# base image's build intact. Do not add them back without re-verifying
+# against that exact base image's own torch/CUDA build.
 
 runpod==1.7.7
-
-torch==2.4.0
-torchvision==0.19.0
 
 diffusers==0.30.2
 transformers==4.44.2
 accelerate==0.33.0
 safetensors==0.4.4
 huggingface_hub==0.24.6
+
+# Required for SDXL LoRA loading with `adapter_name=`/`set_adapters(...)` —
+# diffusers' LoRA loading is PEFT-backed; without peft installed,
+# pipe.load_lora_weights(..., adapter_name=...) raises, which is what broke
+# loading the Kohya-trained SMB-Birthday-v2 LoRA.
+peft==0.12.0
 
 Pillow==10.4.0
 numpy==1.26.4

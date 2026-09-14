@@ -48,6 +48,7 @@ import base64
 import io
 import os
 import time
+from pathlib import Path
 
 import torch
 from diffusers import AutoencoderKL, StableDiffusionXLPipeline
@@ -77,7 +78,7 @@ HF_LORA_REPO = os.environ.get("SMB_LORA_REPO", "hacire-11/smb-birthday-v2")
 HF_LORA_FILENAME = os.environ.get("SMB_LORA_FILENAME", "smb_birthday_v2.safetensors")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
-LORA_ADAPTER_NAME = "smb_birthday_v2"
+LORA_ADAPTER_NAME = "smb-birthday-v2"
 
 DEFAULT_STEPS = 30
 DEFAULT_GUIDANCE_SCALE = 7.0
@@ -238,15 +239,26 @@ if not LORA_PATH:
 
 print(f"[handler] loading LoRA weights: {LORA_PATH}")
 try:
+    # SMB-Birthday-v2 was trained with kohya sd-scripts (Kohya-format SDXL
+    # LoRA state dict — lora_unet_.../lora_te1_.../lora_te2_... key naming).
+    # diffusers auto-detects and converts this format, but loading it with
+    # adapter_name= (and later activating it via set_adapters) requires the
+    # PEFT backend (see requirements.txt: peft) — without peft installed,
+    # this call raises, which was the actual cause of the previous failure.
+    lora_file = Path(LORA_PATH)
     pipe.load_lora_weights(
-        os.path.dirname(LORA_PATH),
-        weight_name=os.path.basename(LORA_PATH),
+        str(lora_file.parent),
+        weight_name=lora_file.name,
         adapter_name=LORA_ADAPTER_NAME,
     )
+    pipe.set_adapters(LORA_ADAPTER_NAME, adapter_weights=DEFAULT_LORA_SCALE)
 except Exception as exc:  # noqa: BLE001 - any load failure must abort startup, not just this one type
-    raise RuntimeError(f"Failed to load SMB-Birthday-v2 LoRA weights from {LORA_PATH}: {exc}") from exc
+    # Log the exception type and message for diagnosis — never HF_TOKEN
+    # (never part of str(exc) for this call: load_lora_weights/set_adapters
+    # don't take a token, they operate on the already-downloaded local file).
+    raise RuntimeError(f"Failed to load SMB-Birthday-v2 LoRA: {type(exc).__name__}: {exc}") from exc
 
-print("[handler] pipeline ready (SDXL + SMB-Birthday-v2 LoRA).")
+print(f"[handler] pipeline ready (SDXL + SMB-Birthday-v2 LoRA, adapter active at scale={DEFAULT_LORA_SCALE}).")
 
 
 def _clamp_lora_scale(value) -> float:

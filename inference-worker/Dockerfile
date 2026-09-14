@@ -13,7 +13,11 @@
 # `docker build -f inference-worker/Dockerfile .` command in README.md,
 # run from the repo root, which mirrors what RunPod does).
 
-FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+# NVIDIA Blackwell GPUs (e.g. RTX PRO 6000 Blackwell, compute capability
+# sm_120) are not supported by the PyTorch 2.4/CUDA 12.4 build previously
+# used here. This base image ships a CUDA 12.8-enabled PyTorch 2.8 build
+# with Blackwell support.
+FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 
 WORKDIR /workspace
 
