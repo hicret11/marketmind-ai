@@ -13,6 +13,16 @@ Base model : stabilityai/stable-diffusion-xl-base-1.0
 VAE        : madebyollin/sdxl-vae-fp16-fix
 LoRA       : SMB-Birthday-v2 (smb_birthday_v2.safetensors)
 
+Base model resolution: on RunPod Serverless (detected by the presence of
+/runpod-volume/huggingface-cache/hub), the base model is loaded from
+RunPod's pre-cached Hugging Face snapshot on the attached volume — never
+downloaded onto container disk (this previously caused "OSError: [Errno 28]
+No space left on device"). Locally, where that cache doesn't exist, the
+base model still loads by model id from the Hugging Face Hub as before.
+This only affects the SDXL BASE MODEL: the VAE and the LoRA still resolve
+over the network as documented below, so HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE
+are deliberately never set globally.
+
 LoRA weight resolution (in order):
   1. Local file at LORA_PATH (default: model/smb_birthday_v2.safetensors
      next to this file) — used for local development. Never committed to
@@ -48,6 +58,11 @@ import runpod
 BASE_MODEL_ID = "stabilityai/stable-diffusion-xl-base-1.0"
 VAE_MODEL_ID = "madebyollin/sdxl-vae-fp16-fix"
 
+# RunPod Serverless workers get pre-cached Hugging Face models on their
+# attached volume under this path. Its presence is also how we detect
+# "this is a RunPod Serverless container" vs. local development.
+RUNPOD_HF_CACHE_ROOT = "/runpod-volume/huggingface-cache/hub"
+
 # Local-dev path — if this exists, it's used as-is and Hugging Face is never
 # contacted. Never committed to Git (see .gitignore: *.safetensors,
 # inference-worker/model/).
@@ -69,6 +84,60 @@ DEFAULT_GUIDANCE_SCALE = 7.0
 DEFAULT_LORA_SCALE = 0.6
 MIN_LORA_SCALE = 0.3
 MAX_LORA_SCALE = 1.0
+
+
+def is_runpod_environment() -> bool:
+    """True when running on a RunPod Serverless worker with the cached
+    Hugging Face hub volume attached — detected solely by that path's
+    presence, per RunPod's own convention."""
+    return os.path.isdir(RUNPOD_HF_CACHE_ROOT)
+
+
+def resolve_runpod_cached_snapshot(model_id: str) -> str | None:
+    """
+    Resolves a local snapshot directory for `model_id` from RunPod's cached
+    Hugging Face hub volume (RUNPOD_HF_CACHE_ROOT), if present. Never
+    downloads anything — read-only filesystem lookup. Returns None if the
+    cache root, the model's cache directory, or any snapshot for it can't
+    be found; callers decide what to do with that.
+
+    Expected structure:
+      RUNPOD_HF_CACHE_ROOT/models--<org>--<name>/
+        refs/main            (a file containing a commit hash)
+        snapshots/<hash>/    (the actual model files, one dir per commit)
+    """
+    model_dir_name = "models--" + model_id.replace("/", "--")
+    model_dir = os.path.join(RUNPOD_HF_CACHE_ROOT, model_dir_name)
+    snapshots_dir = os.path.join(model_dir, "snapshots")
+    if not os.path.isdir(snapshots_dir):
+        return None
+
+    # Prefer the commit hash pinned in refs/main.
+    ref_main_path = os.path.join(model_dir, "refs", "main")
+    if os.path.isfile(ref_main_path):
+        try:
+            with open(ref_main_path, "r", encoding="utf-8") as f:
+                commit_hash = f.read().strip()
+        except OSError:
+            commit_hash = ""
+        if commit_hash:
+            candidate = os.path.join(snapshots_dir, commit_hash)
+            if os.path.isdir(candidate):
+                return candidate
+
+    # Fall back to the first snapshot directory found (sorted for
+    # determinism — there is normally only one anyway).
+    try:
+        snapshot_names = sorted(
+            name for name in os.listdir(snapshots_dir) if os.path.isdir(os.path.join(snapshots_dir, name))
+        )
+    except OSError:
+        snapshot_names = []
+
+    if snapshot_names:
+        return os.path.join(snapshots_dir, snapshot_names[0])
+
+    return None
 
 
 def resolve_lora_path() -> str | None:
@@ -112,13 +181,38 @@ def resolve_lora_path() -> str | None:
 # stays resident in memory for every subsequent warm invocation.
 # ---------------------------------------------------------------------------
 
-print(f"[handler] loading base pipeline: {BASE_MODEL_ID}")
-pipe = StableDiffusionXLPipeline.from_pretrained(
-    BASE_MODEL_ID,
-    torch_dtype=torch.float16,
-    variant="fp16",
-    use_safetensors=True,
-)
+if is_runpod_environment():
+    # On RunPod, load the base model from its pre-cached local snapshot —
+    # never download it onto container disk. Downloading the ~7GB SDXL
+    # base model here is what previously caused
+    # "OSError: [Errno 28] No space left on device".
+    cached_snapshot = resolve_runpod_cached_snapshot(BASE_MODEL_ID)
+    if not cached_snapshot:
+        raise RuntimeError(
+            f"RunPod environment detected ({RUNPOD_HF_CACHE_ROOT} exists) but no cached "
+            f"snapshot for {BASE_MODEL_ID} was found under it. Refusing to fall back to "
+            "downloading the SDXL base model onto container disk. Attach/enable the RunPod "
+            "Cached Model for this base model on the endpoint (or a Network Volume with it) "
+            "before deploying."
+        )
+    print(f"[handler] loading base pipeline from RunPod cached snapshot: {cached_snapshot}")
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        cached_snapshot,
+        torch_dtype=torch.float16,
+        variant="fp16",
+        use_safetensors=True,
+        local_files_only=True,
+    )
+else:
+    # Local development — the RunPod cache path doesn't exist here, so keep
+    # the original behavior: load by model id from the Hugging Face Hub.
+    print(f"[handler] loading base pipeline (Hugging Face Hub): {BASE_MODEL_ID}")
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        BASE_MODEL_ID,
+        torch_dtype=torch.float16,
+        variant="fp16",
+        use_safetensors=True,
+    )
 
 print(f"[handler] loading VAE: {VAE_MODEL_ID}")
 vae = AutoencoderKL.from_pretrained(VAE_MODEL_ID, torch_dtype=torch.float16)
