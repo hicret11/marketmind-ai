@@ -46,22 +46,25 @@ Defaults if omitted: `steps=30`, `guidance_scale=7.0`, `lora_scale=0.6`.
 
 ## Response shape
 
-Today, the handler returns the generated image as base64 PNG:
+MVP contract — the handler returns the generated image as base64 PNG:
 
 ```json
-{ "image_base64": "...", "seed": 12345, "generation_time_s": 4.31 }
+{ "image_base64": "...", "seed": 12345, "width": 768, "height": 1344, "generation_time_s": 4.31 }
 ```
 
-`src/lib/ai-studio/runpod-client.ts` on the MarketMind side is already
-written to **prefer** `image_url` if present, and currently raises a clear
-error if only `image_base64` comes back — as a deliberate reminder that
-returning base64 directly is a temporary/dev-only path, not the intended
-production shape (large payloads, slow, no CDN caching).
+`src/lib/ai-studio/runpod-client.ts` on the MarketMind side turns this into
+a `data:image/png;base64,...` URL and returns that as `imageUrl` — the AI
+Studio result panel just renders it as an `<img src>`, no extra plumbing.
+That client already **prefers** `image_url` over `image_base64` when the
+worker returns one, so this is a deliberately isolated seam: swapping
+base64 for real storage only ever touches `_image_to_output()` below.
 
-**Before deploying for real use**, swap `_image_to_output()` in
+**Before relying on this for real traffic**, swap `_image_to_output()` in
 `handler.py` to upload the PNG to Vercel Blob or Supabase Storage and
-return `{"image_url": "https://..."}` instead. That's the only change
-needed on the worker side; the Next.js side already expects it.
+return `{"image_url": "https://..."}` instead — large base64 payloads over
+RunPod's sync API are a dev-only stopgap, not a production shape (slow, no
+CDN caching). That's the only change needed on the worker side; the
+Next.js side already expects it.
 
 ## LoRA weights — where they live
 
@@ -86,11 +89,26 @@ For local reference, a copy currently lives at
    cold start, never per request.
 
 An alternative for RunPod — baking the weights into the Docker image or
-mounting a Network Volume — is still possible (see the commented `COPY
-model/...` line in `Dockerfile`), but is no longer necessary now that the
-Hugging Face fallback exists.
+mounting a Network Volume — is still possible, but is no longer necessary
+now that the Hugging Face fallback exists.
 
 Never add the `.safetensors` file to Git regardless of which option is used.
+
+## Docker build context — this is a monorepo, not a standalone worker repo
+
+`Dockerfile` lives at `inference-worker/Dockerfile`, but RunPod's GitHub
+Serverless deploy builds it with the **repository root** as the Docker
+build context (not `inference-worker/`). Its `COPY` lines are written to
+match that: `COPY inference-worker/requirements.txt ...` and
+`COPY inference-worker/handler.py ...`, not bare filenames. `.dockerignore`
+lives at the repo root for the same reason — Docker only reads a
+`.dockerignore` from the context root.
+
+If you ever build locally, mirror that with `-f`/context split (see step 1
+below) rather than `docker build ./inference-worker` — the latter would set
+the context to `inference-worker/` and the `COPY inference-worker/...`
+paths would then look for a nonexistent `inference-worker/inference-worker/`
+directory and fail.
 
 ## Environment variables (worker side)
 
@@ -106,9 +124,13 @@ platform at runtime — nothing else to set here.)
 
 ## Next steps to actually deploy (not done yet)
 
-1. `docker build -t <your-registry>/smb-birthday-worker:v1 ./inference-worker`
-   (no LoRA baking needed — the Hugging Face fallback handles it at cold
-   start, as long as `HF_TOKEN` is set on the endpoint).
+1. From the **repository root** (not `inference-worker/`):
+   ```
+   docker build -f inference-worker/Dockerfile -t <your-registry>/smb-birthday-worker:v1 .
+   ```
+   This matches RunPod's own repo-root build context (see above). No LoRA
+   baking needed — the Hugging Face fallback handles it at cold start, as
+   long as `HF_TOKEN` is set on the endpoint.
 2. `docker push <your-registry>/smb-birthday-worker:v1`
 3. In the RunPod dashboard: **Serverless → New Endpoint**, point it at that
    image, pick a GPU (SDXL needs ≥16GB VRAM — an A4000/A5000 class GPU or

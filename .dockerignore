@@ -1,0 +1,40 @@
+# Docker build context for inference-worker/Dockerfile is the REPOSITORY
+# ROOT (see the comment at the top of that file) — this .dockerignore must
+# therefore live at the repo root too, not inside inference-worker/, or
+# Docker won't apply it.
+#
+# The Dockerfile only explicitly COPYs inference-worker/requirements.txt and
+# inference-worker/handler.py into the image, so nothing below ever ends up
+# baked in regardless — this file's job is to keep large/irrelevant/
+# sensitive content from even being uploaded as build context, and to be a
+# second guard rail if the Dockerfile's COPY list ever changes.
+
+# Secrets — never sent to the Docker build context
+.env
+.env.local
+.env*.local
+
+# Model weights — never baked into the image; downloaded from the private
+# Hugging Face repo at worker startup instead (see inference-worker/handler.py)
+*.safetensors
+model/
+inference-worker/model/
+
+# Next.js app — irrelevant to the Python worker image
+node_modules/
+.next/
+out/
+build/
+public/
+src/
+data/
+
+# VCS / tooling / OS noise
+.git/
+.claude/
+.vscode/
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
